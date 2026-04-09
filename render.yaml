@@ -1,0 +1,48 @@
+services:
+  - type: worker
+    name: telegram-media-bot
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DOWNLOAD_CONCURRENCY
+        value: "3"
+      - key: DOWNLOAD_TIMEOUT_SECONDS
+        value: "1800"
+      - key: RATE_LIMIT_COUNT
+        value: "5"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "3600"
+      - key: MAX_DURATION_SECONDS
+        value: "0"
+      - key: MAX_FILE_SIZE_BYTES
+        value: "10737418240"
+      - key: BOT_API_LIMIT_BYTES
+        value: "52428800"
+      - key: MTPROTO_LIMIT_BYTES
+        value: "2147483648"
+      - key: FILE_TTL_SECONDS
+        value: "600"
+      - key: YTDLP_HTTP_CHUNK_SIZE_BYTES
+        value: "10485760"
+      - key: YTDLP_FRAGMENT_CONCURRENCY
+        value: "6"
+      - key: YTDLP_RETRIES
+        value: "5"
+      - key: MTPROTO_PART_SIZE_KB
+        value: "512"

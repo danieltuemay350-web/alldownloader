@@ -48,6 +48,22 @@ docker build -t telegram-media-bot .
 docker run --env-file .env telegram-media-bot
 ```
 
+## Deploy on Render
+
+This project includes `render.yaml` for a `Background Worker` deployment on Render.
+
+Recommended setup:
+
+- Use a `Background Worker`, not a web service
+- Keep the instance count at `1`
+- Fill in these secret environment variables in Render:
+  - `BOT_TOKEN`
+  - `TELEGRAM_API_ID`
+  - `TELEGRAM_API_HASH`
+  - `ADMIN_CHAT_ID` (optional)
+
+The included Dockerfile installs FFmpeg inside the container, so no extra build steps are required.
+
 To receive error alerts in Telegram, set:
 
 ```env
