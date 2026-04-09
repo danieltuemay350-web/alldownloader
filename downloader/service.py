@@ -1,0 +1,552 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import shutil
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError as YtDlpDownloadError
+
+from config import Settings
+from downloader.exceptions import DownloadCancelledError, DownloadError, MediaTooLargeError, MediaTooLongError, MediaUnavailableError
+from downloader.models import DownloadArtifact, DownloadRequest, FormatOption, MediaKind, MediaMetadata, MediaPreview
+from downloader.platforms import normalize_url, require_supported_platform
+from utils.files import human_bytes, newest_media_file, sanitize_filename
+
+logger = logging.getLogger(__name__)
+
+
+class MediaDownloader:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def normalize_url(self, url: str) -> str:
+        normalized = normalize_url(url)
+        require_supported_platform(normalized)
+        return normalized
+
+    async def inspect(self, request: DownloadRequest) -> MediaMetadata:
+        info = await self._extract_info(request.url)
+        return self._build_metadata(request, info)
+
+    async def preview(self, url: str) -> MediaPreview:
+        normalized = self.normalize_url(url)
+        probe_request = DownloadRequest(
+            user_id=0,
+            chat_id=0,
+            url=normalized,
+            kind=MediaKind.VIDEO,
+        )
+        info = await self._extract_info(normalized)
+        metadata = self._build_metadata(probe_request, info)
+        return MediaPreview(
+            metadata=metadata,
+            video_options=self._build_video_options(info),
+            audio_options=self._build_audio_options(info),
+        )
+
+    async def _extract_info(self, url: str) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(self._extract_info_sync, url)
+        except YtDlpDownloadError as exc:
+            raise MediaUnavailableError(self._classify_source_error(exc)) from exc
+        except Exception as exc:
+            raise DownloadError("Failed to read media metadata from the source URL.") from exc
+
+    def _build_metadata(self, request: DownloadRequest, info: dict[str, Any]) -> MediaMetadata:
+        platform = require_supported_platform(request.url)
+
+        duration = info.get("duration")
+        if (
+            self.settings.max_duration_seconds > 0
+            and duration
+            and duration > self.settings.max_duration_seconds
+        ):
+            raise MediaTooLongError(
+                f"The media is longer than {self._format_duration_limit(self.settings.max_duration_seconds)} "
+                "and cannot be processed."
+            )
+
+        size_estimate = self._estimate_size(info, request.kind)
+        if size_estimate and size_estimate > self._max_sendable_bytes():
+            raise MediaTooLargeError(self._delivery_limit_message())
+        if size_estimate and size_estimate > self.settings.max_file_size_bytes:
+            raise MediaTooLargeError("The media is larger than the 10 GB processing limit.")
+
+        return MediaMetadata(
+            source_url=request.url,
+            platform=platform,
+            title=sanitize_filename(info.get("title") or info.get("id") or "download"),
+            extractor_id=info.get("id"),
+            duration=duration,
+            size_estimate=size_estimate,
+            uploader=info.get("uploader") or info.get("channel") or info.get("creator"),
+            thumbnail_url=info.get("thumbnail"),
+        )
+
+    async def download(
+        self,
+        request: DownloadRequest,
+        metadata: MediaMetadata,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> DownloadArtifact:
+        job_dir = self.settings.temp_dir / f"{uuid.uuid4().hex}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            file_path = await self._download_with_progress(request, metadata, job_dir, progress_callback, cancel_requested)
+        except DownloadCancelledError:
+            raise
+        except YtDlpDownloadError as exc:
+            logger.exception("yt-dlp download failed for %s (%s)", request.url, request.kind.value)
+            if "cancel" in str(exc).lower():
+                raise DownloadCancelledError("Canceled. The download was stopped.") from exc
+            if "ffmpeg is not installed" in str(exc).lower():
+                raise DownloadError(
+                    "FFmpeg is required for this download but was not detected. "
+                    "Set FFMPEG_BINARY in .env to the full ffmpeg.exe path or restart after adding FFmpeg to PATH."
+                ) from exc
+            raise MediaUnavailableError(self._classify_source_error(exc)) from exc
+        except Exception as exc:
+            logger.exception("Unexpected download failure for %s (%s)", request.url, request.kind.value)
+            raise DownloadError("The download failed before completion.") from exc
+
+        file_size = file_path.stat().st_size
+        if file_size <= 0:
+            raise DownloadError("Download finished with an empty output file.")
+        if file_size > self._max_sendable_bytes():
+            raise MediaTooLargeError(self._delivery_limit_message())
+        if file_size > self.settings.max_file_size_bytes:
+            raise MediaTooLargeError("The resulting file is larger than the 10 GB processing limit.")
+
+        return DownloadArtifact(
+            file_path=file_path,
+            file_size=file_size,
+            kind=request.kind,
+            metadata=metadata,
+        )
+
+    async def _download_with_progress(
+        self,
+        request: DownloadRequest,
+        metadata: MediaMetadata,
+        job_dir: Path,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> Path:
+        loop = asyncio.get_running_loop()
+        progress_hook = self._build_progress_hook(loop, progress_callback, cancel_requested)
+        return await asyncio.to_thread(self._download_sync, request, metadata, job_dir, progress_hook)
+
+    def _extract_info_sync(self, url: str) -> dict[str, Any]:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "extract_flat": False,
+            "skip_download": True,
+            "socket_timeout": 30,
+            "retries": max(2, self.settings.ytdlp_retries // 2),
+        }
+        if self.settings.ytdlp_proxy:
+            options["proxy"] = self.settings.ytdlp_proxy
+
+        with YoutubeDL(options) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    def _download_sync(
+        self,
+        request: DownloadRequest,
+        metadata: MediaMetadata,
+        job_dir: Path,
+        progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Path:
+        base_name = sanitize_filename(metadata.title)[:120]
+        if metadata.extractor_id:
+            base_name = f"{base_name} [{metadata.extractor_id}]"
+
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 30,
+            "retries": self.settings.ytdlp_retries,
+            "fragment_retries": self.settings.ytdlp_retries,
+            "outtmpl": str(job_dir / f"{base_name}.%(ext)s"),
+            "concurrent_fragment_downloads": self.settings.ytdlp_fragment_concurrency,
+            "continuedl": True,
+            "http_chunk_size": self.settings.ytdlp_http_chunk_size_bytes,
+        }
+        if self.settings.ytdlp_proxy:
+            options["proxy"] = self.settings.ytdlp_proxy
+        ffmpeg_location = self._resolve_ffmpeg_location()
+        if ffmpeg_location:
+            options["ffmpeg_location"] = ffmpeg_location
+        if progress_hook is not None:
+            options["progress_hooks"] = [progress_hook]
+
+        if request.kind is MediaKind.AUDIO:
+            audio_quality = request.audio_bitrate_kbps or 320
+            options.update(
+                {
+                    "format": request.format_selector or "bestaudio[acodec!=none]/bestaudio/best",
+                }
+            )
+            if (request.output_ext or "mp3").lower() == "mp3":
+                options.update(
+                    {
+                        "final_ext": "mp3",
+                        "postprocessors": [
+                            {
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": str(audio_quality),
+                            }
+                        ],
+                        "postprocessor_args": ["-b:a", f"{audio_quality}k"],
+                        "prefer_ffmpeg": True,
+                        "keepvideo": False,
+                    }
+                )
+        else:
+            options.update(
+                {
+                    "format": request.format_selector or "bestvideo*+bestaudio/best",
+                    "merge_output_format": request.output_ext or "mp4",
+                }
+            )
+
+        with YoutubeDL(options) as ydl:
+            ydl.extract_info(request.url, download=True)
+
+        file_path = newest_media_file(job_dir)
+        if file_path is None:
+            raise DownloadError("Download finished but no media file was produced.")
+        return file_path
+
+    def _estimate_size(self, info: dict[str, Any], kind: MediaKind) -> int | None:
+        if kind is MediaKind.AUDIO:
+            duration = info.get("duration")
+            if duration:
+                return int((duration * 320_000 / 8) * 1.03)
+            return info.get("filesize") or info.get("filesize_approx")
+
+        direct_size = info.get("filesize") or info.get("filesize_approx")
+        if direct_size:
+            return int(direct_size)
+
+        requested_formats = info.get("requested_formats") or []
+        if requested_formats:
+            total = 0
+            for fmt in requested_formats:
+                total += fmt.get("filesize") or fmt.get("filesize_approx") or 0
+            if total:
+                return int(total)
+
+        formats = info.get("formats") or []
+        if not formats:
+            return None
+
+        best_audio = 0
+        for fmt in formats:
+            if fmt.get("vcodec") == "none":
+                best_audio = max(best_audio, fmt.get("filesize") or fmt.get("filesize_approx") or 0)
+
+        ranked_video = sorted(
+            (fmt for fmt in formats if fmt.get("vcodec") not in {None, "none"}),
+            key=lambda item: (item.get("height") or 0, item.get("tbr") or 0),
+            reverse=True,
+        )
+        for fmt in ranked_video:
+            size = fmt.get("filesize") or fmt.get("filesize_approx")
+            if size:
+                return int(size + best_audio)
+        return None
+
+    def _build_video_options(self, info: dict[str, Any]) -> list[FormatOption]:
+        formats = info.get("formats") or []
+        heights = sorted(
+            {
+                int(fmt.get("height"))
+                for fmt in formats
+                if fmt.get("vcodec") not in {None, "none"} and fmt.get("height")
+            },
+            reverse=True,
+        )
+        if not heights:
+            return []
+
+        chosen_heights: list[int] = []
+        best_height = heights[0]
+        chosen_heights.append(best_height)
+
+        balanced_height = next((height for height in heights if height <= 720), None)
+        if balanced_height and balanced_height not in chosen_heights:
+            chosen_heights.append(balanced_height)
+
+        small_height = next((height for height in heights if height <= 480), None)
+        if small_height and small_height not in chosen_heights:
+            chosen_heights.append(small_height)
+
+        for candidate in heights:
+            if len(chosen_heights) >= 3:
+                break
+            if candidate not in chosen_heights:
+                chosen_heights.append(candidate)
+
+        options: list[FormatOption] = []
+        for index, height in enumerate(chosen_heights, start=1):
+            size_hint = self._estimate_video_size_for_height(formats, height)
+            size_text = f", ~{human_bytes(size_hint)}" if size_hint else ""
+            if index == 1:
+                label = f"Best quality video ({height}p MP4{size_text})"
+            elif height <= 480:
+                label = f"Smaller video ({height}p MP4{size_text})"
+            else:
+                label = f"Balanced video ({height}p MP4{size_text})"
+            options.append(
+                FormatOption(
+                    option_id=f"v{index}",
+                    kind=MediaKind.VIDEO,
+                    label=label,
+                    selector=(
+                        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+                        f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+                    ),
+                    output_ext="mp4",
+                )
+            )
+        return options
+
+    def _build_audio_options(self, info: dict[str, Any]) -> list[FormatOption]:
+        formats = info.get("formats") or []
+        has_audio = any(fmt.get("acodec") not in {None, "none"} for fmt in formats)
+        if not has_audio:
+            return []
+
+        duration = int(round(info.get("duration") or 0))
+        original_size = self._estimate_best_audio_size(formats)
+        original_text = f", ~{human_bytes(original_size)}" if original_size else ""
+        mp3_320_size = self._estimate_mp3_size(duration, 320)
+        mp3_192_size = self._estimate_mp3_size(duration, 192)
+        mp3_128_size = self._estimate_mp3_size(duration, 128)
+
+        return [
+            FormatOption(
+                option_id="aorig",
+                kind=MediaKind.AUDIO,
+                label=f"Original audio (fastest{original_text})",
+                selector="bestaudio[ext=m4a]/bestaudio[acodec!=none]/bestaudio/best",
+                output_ext="m4a",
+            ),
+            FormatOption(
+                option_id="a320",
+                kind=MediaKind.AUDIO,
+                label=f"MP3 audio (320 kbps, ~{human_bytes(mp3_320_size)})",
+                selector="bestaudio[acodec!=none]/bestaudio/best",
+                output_ext="mp3",
+                audio_bitrate_kbps=320,
+            ),
+            FormatOption(
+                option_id="a192",
+                kind=MediaKind.AUDIO,
+                label=f"MP3 audio (192 kbps, ~{human_bytes(mp3_192_size)})",
+                selector="bestaudio[acodec!=none]/bestaudio/best",
+                output_ext="mp3",
+                audio_bitrate_kbps=192,
+            ),
+            FormatOption(
+                option_id="a128",
+                kind=MediaKind.AUDIO,
+                label=f"Fast MP3 audio (128 kbps, ~{human_bytes(mp3_128_size)})",
+                selector="bestaudio[acodec!=none]/bestaudio/best",
+                output_ext="mp3",
+                audio_bitrate_kbps=128,
+            ),
+        ]
+
+    def _estimate_best_audio_size(self, formats: list[dict[str, Any]]) -> int | None:
+        sizes = [
+            fmt.get("filesize") or fmt.get("filesize_approx")
+            for fmt in formats
+            if fmt.get("acodec") not in {None, "none"}
+        ]
+        parsed = [int(size) for size in sizes if size]
+        return max(parsed) if parsed else None
+
+    def _estimate_mp3_size(self, duration_seconds: int, bitrate_kbps: int) -> int:
+        if duration_seconds <= 0:
+            return bitrate_kbps * 1024
+        return int((duration_seconds * bitrate_kbps * 1000 / 8) * 1.03)
+
+    def _estimate_video_size_for_height(self, formats: list[dict[str, Any]], max_height: int) -> int | None:
+        audio_size = self._estimate_best_audio_size(formats) or 0
+        video_sizes: list[int] = []
+        for fmt in formats:
+            if fmt.get("vcodec") in {None, "none"}:
+                continue
+            height = fmt.get("height")
+            if not height or int(height) > max_height:
+                continue
+            size = fmt.get("filesize") or fmt.get("filesize_approx")
+            if size:
+                video_sizes.append(int(size))
+        if not video_sizes:
+            return None
+        return max(video_sizes) + audio_size
+
+    def _max_sendable_bytes(self) -> int:
+        if self.settings.telegram_api_id and self.settings.telegram_api_hash:
+            return self.settings.mtproto_limit_bytes
+        return self.settings.bot_api_limit_bytes
+
+    def _delivery_limit_message(self) -> str:
+        limit = human_bytes(self._max_sendable_bytes())
+        if self.settings.telegram_api_id and self.settings.telegram_api_hash:
+            return f"This file is too large to send in Telegram. Please choose a smaller option (up to {limit})."
+        return (
+            "This file is too large to send with the current setup. "
+            f"Without MTProto configured, the direct-send limit is {limit}."
+        )
+
+    def _resolve_ffmpeg_location(self) -> str | None:
+        candidate = self.settings.ffmpeg_binary
+        if candidate:
+            path = Path(candidate)
+            if path.exists():
+                return str(path)
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+
+        return shutil.which("ffmpeg")
+
+    def _build_progress_hook(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        cancel_requested: Callable[[], bool] | None,
+    ) -> Callable[[dict[str, Any]], None]:
+        last_emit_at = 0.0
+        last_percent = -1
+
+        def hook(data: dict[str, Any]) -> None:
+            nonlocal last_emit_at, last_percent
+            if cancel_requested and cancel_requested():
+                raise DownloadCancelledError("Canceled. The download was stopped.")
+            if progress_callback is None:
+                return
+
+            status = data.get("status")
+            now = time.monotonic()
+
+            if status == "downloading":
+                total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+                downloaded = data.get("downloaded_bytes") or 0
+                percent = int((downloaded / total) * 100) if total else last_percent
+                should_emit = (
+                    last_percent < 0
+                    or percent >= last_percent + 3
+                    or now - last_emit_at >= 2.0
+                )
+                if not should_emit:
+                    return
+
+                last_emit_at = now
+                last_percent = percent
+                payload = {
+                    "status": "downloading",
+                    "percent": max(percent, 0),
+                    "downloaded_bytes": downloaded,
+                    "total_bytes": total,
+                    "speed": data.get("speed"),
+                    "eta": data.get("eta"),
+                }
+                asyncio.run_coroutine_threadsafe(progress_callback(payload), loop)
+                return
+
+            if status == "finished":
+                payload = {"status": "processing"}
+                asyncio.run_coroutine_threadsafe(progress_callback(payload), loop)
+
+        return hook
+
+    def _format_duration_limit(self, total_seconds: int) -> str:
+        hours, remainder = divmod(int(total_seconds), 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours and minutes:
+            return f"{hours}h {minutes}m"
+        if hours:
+            return f"{hours} hour(s)"
+        if minutes:
+            return f"{minutes} minute(s)"
+        return f"{total_seconds} second(s)"
+
+    def _classify_source_error(self, exc: Exception) -> str:
+        message = str(exc).lower()
+
+        if any(
+            token in message
+            for token in (
+                "login required",
+                "sign in",
+                "cookies",
+                "authentication required",
+                "members only",
+                "membership",
+                "age-restricted",
+                "confirm your age",
+            )
+        ):
+            return "This content requires you to be logged in, and the bot does not have authorized access for it."
+
+        if any(
+            token in message
+            for token in (
+                "not available in your country",
+                "not available from your location",
+                "geo",
+                "region",
+                "country",
+                "blocked in your country",
+            )
+        ):
+            return "This content appears to be geo-blocked and is not available from the bot's current region."
+
+        if any(
+            token in message
+            for token in (
+                "private video",
+                "is private",
+                "private content",
+                "private post",
+                "private account",
+                "private",
+                "followers only",
+                "friends only",
+            )
+        ):
+            return "This content is private or restricted to approved viewers."
+
+        if any(
+            token in message
+            for token in (
+                "video unavailable",
+                "content unavailable",
+                "not available",
+                "has been removed",
+                "was removed",
+                "deleted",
+                "does not exist",
+                "not found",
+                "404",
+            )
+        ):
+            return "This content looks deleted, unavailable, or no longer accessible at this link."
+
+        return "The content could not be accessed from the source platform."
