@@ -46,6 +46,17 @@ def _env_runtime_path(name: str, default: Path, anchor_dir: Path) -> Path:
     return path.resolve()
 
 
+def _env_optional_path(name: str, anchor_dir: Path) -> Path | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+
+    path = Path(raw.strip())
+    if not path.is_absolute():
+        path = anchor_dir / path
+    return path.resolve()
+
+
 def _is_dir_writable(path: Path) -> bool:
     probe = path / ".write_test"
     try:
@@ -97,6 +108,7 @@ class Settings:
     public_base_url: str | None
     temp_dir: Path
     public_dir: Path
+    ytdlp_cookie_file: Path | None
     ffmpeg_binary: str | None
     ytdlp_proxy: str | None
     ytdlp_http_chunk_size_bytes: int
@@ -155,6 +167,7 @@ class Settings:
             public_base_url=_env_str("PUBLIC_BASE_URL") or None,
             temp_dir=_env_runtime_path("TEMP_DIR", runtime_dir / "storage" / "temp", path_anchor),
             public_dir=_env_runtime_path("PUBLIC_DIR", runtime_dir / "storage" / "public", path_anchor),
+            ytdlp_cookie_file=_env_optional_path("YTDLP_COOKIE_FILE", path_anchor),
             ffmpeg_binary=_env_str("FFMPEG_BINARY") or None,
             ytdlp_proxy=_env_str("YTDLP_PROXY") or None,
             ytdlp_http_chunk_size_bytes=_env_int("YTDLP_HTTP_CHUNK_SIZE_BYTES", 10 * 1024 * 1024),

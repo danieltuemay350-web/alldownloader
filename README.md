@@ -96,6 +96,8 @@ For faster MTProto uploads, keep `cryptg` installed from `requirements.txt`. Tel
 
 For TikTok, the bot now retries temporary connection resets automatically. If TikTok continues refusing requests from your network, you can optionally provide `TIKTOK_API_HOSTNAME`, `TIKTOK_APP_INFO`, `TIKTOK_DEVICE_ID`, or a proxy in `.env`.
 
+For YouTube, some videos may trigger a sign-in challenge from YouTube. In that case, configure `YTDLP_COOKIE_FILE` with an authorized cookies file in Netscape format. On Choreo, this is best provided through a file mount.
+
 ## Large File Delivery
 
 - `<= 50 MB`: delivered via Bot API

@@ -456,6 +456,9 @@ class MediaDownloader:
         if self.settings.ytdlp_proxy:
             options["proxy"] = self.settings.ytdlp_proxy
 
+        if self.settings.ytdlp_cookie_file:
+            options["cookiefile"] = str(self.settings.ytdlp_cookie_file)
+
         extractor_args = self._build_extractor_args(url)
         if extractor_args:
             options["extractor_args"] = extractor_args
@@ -581,6 +584,12 @@ class MediaDownloader:
                 )
             return "The source platform temporarily refused the connection. Please try again in a moment."
 
+        if self._is_youtube_signin_challenge(url, message):
+            return (
+                "YouTube is asking the bot to sign in before it will serve this video. "
+                "Add an authorized YouTube cookies file to the bot configuration and try again."
+            )
+
         if any(
             token in message
             for token in (
@@ -663,3 +672,19 @@ class MediaDownloader:
     def _is_tiktok_url(self, url: str) -> bool:
         lowered_url = url.lower()
         return "tiktok.com" in lowered_url or "vm.tiktok" in lowered_url
+
+    def _is_youtube_signin_challenge(self, url: str, message: str) -> bool:
+        lowered_url = url.lower()
+        if "youtube.com" not in lowered_url and "youtu.be" not in lowered_url:
+            return False
+
+        lowered = message.lower()
+        return any(
+            token in lowered
+            for token in (
+                "sign in to confirm you're not a bot",
+                "sign in to confirm you???re not a bot",
+                "cookies-from-browser",
+                "use --cookies",
+            )
+        )
