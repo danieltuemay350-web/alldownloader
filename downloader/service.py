@@ -71,6 +71,8 @@ class MediaDownloader:
             except DownloadError:
                 raise
             except Exception as exc:
+                if self._looks_like_ytdlp_failure(exc):
+                    raise MediaUnavailableError(self._classify_source_error(exc, url)) from exc
                 logger.exception("Unexpected metadata extraction failure for %s", url)
                 raise DownloadError("Failed to read media metadata from the source URL.") from exc
 
@@ -723,8 +725,15 @@ class MediaDownloader:
             token in lowered
             for token in (
                 "sign in to confirm you're not a bot",
+                "sign in to confirm you’re not a bot",
                 "sign in to confirm you???re not a bot",
+                "not a bot",
                 "cookies-from-browser",
                 "use --cookies",
             )
         )
+
+    def _looks_like_ytdlp_failure(self, exc: Exception) -> bool:
+        module = exc.__class__.__module__.lower()
+        name = exc.__class__.__name__.lower()
+        return module.startswith("yt_dlp") or "downloaderror" in name or "extractorerror" in name
