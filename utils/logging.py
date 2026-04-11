@@ -7,7 +7,7 @@ from config import Settings
 
 
 def setup_logging(settings: Settings) -> None:
-    log_file = settings.base_dir / "logs" / "bot.log"
+    log_file = settings.log_dir / "bot.log"
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
     console_handler = logging.StreamHandler()
@@ -26,4 +26,3 @@ def setup_logging(settings: Settings) -> None:
     root.handlers.clear()
     root.addHandler(console_handler)
     root.addHandler(file_handler)
-

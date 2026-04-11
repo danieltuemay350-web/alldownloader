@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,9 +35,46 @@ def _env_path(name: str, default: str, base_dir: Path) -> Path:
     return path.resolve()
 
 
+def _env_runtime_path(name: str, default: Path, anchor_dir: Path) -> Path:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default.resolve()
+
+    path = Path(raw.strip())
+    if not path.is_absolute():
+        path = anchor_dir / path
+    return path.resolve()
+
+
+def _is_dir_writable(path: Path) -> bool:
+    probe = path / ".write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _default_runtime_dir(base_dir: Path) -> Path:
+    configured = os.getenv("RUNTIME_DIR")
+    if configured and configured.strip():
+        path = Path(configured.strip())
+        if not path.is_absolute():
+            path = base_dir / path
+        return path.resolve()
+
+    if _is_dir_writable(base_dir):
+        return base_dir
+
+    return (Path(tempfile.gettempdir()) / "telegram-media-bot").resolve()
+
+
 @dataclass(slots=True)
 class Settings:
     base_dir: Path
+    runtime_dir: Path
+    log_dir: Path
     bot_token: str
     admin_chat_id: int | None
     telegram_api_id: int | None
@@ -88,9 +126,13 @@ class Settings:
     def from_env(cls) -> "Settings":
         load_dotenv()
         base_dir = Path(__file__).resolve().parent.parent
+        runtime_dir = _default_runtime_dir(base_dir)
+        path_anchor = base_dir if runtime_dir == base_dir else runtime_dir
 
         settings = cls(
             base_dir=base_dir,
+            runtime_dir=runtime_dir,
+            log_dir=_env_runtime_path("LOG_DIR", runtime_dir / "logs", path_anchor),
             bot_token=_env_str("BOT_TOKEN"),
             admin_chat_id=_env_int("ADMIN_CHAT_ID", 0) or None,
             telegram_api_id=_env_int("TELEGRAM_API_ID", 0) or None,
@@ -111,8 +153,8 @@ class Settings:
             public_host=_env_str("PUBLIC_HOST", "0.0.0.0"),
             public_port=_env_int("PUBLIC_PORT", 8080),
             public_base_url=_env_str("PUBLIC_BASE_URL") or None,
-            temp_dir=_env_path("TEMP_DIR", "storage/temp", base_dir),
-            public_dir=_env_path("PUBLIC_DIR", "storage/public", base_dir),
+            temp_dir=_env_runtime_path("TEMP_DIR", runtime_dir / "storage" / "temp", path_anchor),
+            public_dir=_env_runtime_path("PUBLIC_DIR", runtime_dir / "storage" / "public", path_anchor),
             ffmpeg_binary=_env_str("FFMPEG_BINARY") or None,
             ytdlp_proxy=_env_str("YTDLP_PROXY") or None,
             ytdlp_http_chunk_size_bytes=_env_int("YTDLP_HTTP_CHUNK_SIZE_BYTES", 10 * 1024 * 1024),
@@ -135,7 +177,8 @@ class Settings:
         if settings.ffmpeg_binary == "ffmpeg":
             settings.ffmpeg_binary = shutil.which("ffmpeg")
 
+        settings.runtime_dir.mkdir(parents=True, exist_ok=True)
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
         settings.temp_dir.mkdir(parents=True, exist_ok=True)
         settings.public_dir.mkdir(parents=True, exist_ok=True)
-        (settings.base_dir / "logs").mkdir(parents=True, exist_ok=True)
         return settings

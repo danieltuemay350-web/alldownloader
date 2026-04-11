@@ -47,7 +47,9 @@ class MTProtoUploader:
             )
             return
 
-        session_path = str(self.settings.base_dir / "bot_mtproto")
+        session_dir = self.settings.runtime_dir / "state"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_path = str(session_dir / "bot_mtproto")
         self._client = TelegramClient(
             session=session_path,
             api_id=self.settings.telegram_api_id,
