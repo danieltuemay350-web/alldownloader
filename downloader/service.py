@@ -68,7 +68,10 @@ class MediaDownloader:
                     await asyncio.sleep(delay)
                     continue
                 raise MediaUnavailableError(self._classify_source_error(exc, url)) from exc
+            except DownloadError:
+                raise
             except Exception as exc:
+                logger.exception("Unexpected metadata extraction failure for %s", url)
                 raise DownloadError("Failed to read media metadata from the source URL.") from exc
 
         raise DownloadError("Failed to read media metadata from the source URL.")
@@ -456,8 +459,9 @@ class MediaDownloader:
         if self.settings.ytdlp_proxy:
             options["proxy"] = self.settings.ytdlp_proxy
 
-        if self.settings.ytdlp_cookie_file:
-            options["cookiefile"] = str(self.settings.ytdlp_cookie_file)
+        cookie_file = self._resolve_cookie_file_for_ytdlp()
+        if cookie_file:
+            options["cookiefile"] = cookie_file
 
         extractor_args = self._build_extractor_args(url)
         if extractor_args:
@@ -511,6 +515,42 @@ class MediaDownloader:
                 return resolved
 
         return shutil.which("ffmpeg")
+
+    def _resolve_cookie_file_for_ytdlp(self) -> str | None:
+        cookie_path = self.settings.ytdlp_cookie_file
+        if cookie_path is None:
+            return None
+
+        if not cookie_path.exists():
+            raise DownloadError(
+                "The configured YouTube cookies file was not found in the runtime environment. "
+                "Check the Choreo file mount and YTDLP_COOKIE_FILE path."
+            )
+        if not cookie_path.is_file():
+            raise DownloadError(
+                "The configured YTDLP_COOKIE_FILE path is not a file. "
+                "Check the Choreo file mount target path."
+            )
+
+        try:
+            first_line = cookie_path.read_text(encoding="utf-8", errors="ignore").splitlines()[:1]
+        except OSError as exc:
+            raise DownloadError(
+                "The configured YouTube cookies file could not be read. "
+                "Check the Choreo file mount permissions."
+            ) from exc
+
+        if cookie_path.stat().st_size <= 0:
+            raise DownloadError("The configured YouTube cookies file is empty.")
+
+        if first_line:
+            header = first_line[0].strip().lower()
+            if header and "netscape" not in header and "http cookie file" not in header:
+                raise DownloadError(
+                    "The configured YouTube cookies file is not in Netscape cookies.txt format."
+                )
+
+        return str(cookie_path)
 
     def _build_progress_hook(
         self,
