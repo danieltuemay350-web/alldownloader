@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiohttp import web
 
@@ -14,10 +14,8 @@ logger = logging.getLogger(__name__)
 class HealthServer:
     settings: Settings
     version: str = "1.0"
-
-    def __post_init__(self) -> None:
-        self._runner: web.AppRunner | None = None
-        self._site: web.TCPSite | None = None
+    _runner: web.AppRunner | None = field(init=False, default=None, repr=False)
+    _site: web.TCPSite | None = field(init=False, default=None, repr=False)
 
     async def start(self) -> None:
         app = web.Application()
