@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -119,43 +121,66 @@ class MediaDownloader:
         job_dir = self.settings.temp_dir / f"{uuid.uuid4().hex}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        request_variants = [request]
+        relaxed_request = self._relax_request_for_format_fallback(request)
+        if relaxed_request is not None:
+            request_variants.append(relaxed_request)
+
         attempts = 2 if self._is_tiktok_url(request.url) else 1
         try:
-            for attempt in range(1, attempts + 1):
-                try:
-                    file_path = await self._download_with_progress(
-                        request,
-                        metadata,
-                        job_dir,
-                        progress_callback,
-                        cancel_requested,
-                    )
-                    break
-                except DownloadCancelledError:
-                    raise
-                except YtDlpDownloadError as exc:
-                    if "cancel" in str(exc).lower():
-                        raise DownloadCancelledError("Canceled. The download was stopped.") from exc
-                    if attempt < attempts and self._is_temporary_source_failure_message(request.url, str(exc)):
-                        delay = min(2.0 * attempt, 6.0)
-                        logger.warning(
-                            "Temporary download failure for %s (%s), retrying in %.1fs (%s/%s): %s",
-                            request.url,
-                            request.kind.value,
-                            delay,
-                            attempt,
-                            attempts,
-                            exc,
+            for variant_index, current_request in enumerate(request_variants):
+                for attempt in range(1, attempts + 1):
+                    try:
+                        file_path = await self._download_with_progress(
+                            current_request,
+                            metadata,
+                            job_dir,
+                            progress_callback,
+                            cancel_requested,
                         )
-                        await asyncio.sleep(delay)
-                        continue
-                    logger.exception("yt-dlp download failed for %s (%s)", request.url, request.kind.value)
-                    if "ffmpeg is not installed" in str(exc).lower():
-                        raise DownloadError(
-                            "FFmpeg is required for this download but was not detected. "
-                            "Set FFMPEG_BINARY in .env to the full ffmpeg.exe path or restart after adding FFmpeg to PATH."
-                        ) from exc
-                    raise MediaUnavailableError(self._classify_source_error(exc, request.url)) from exc
+                        break
+                    except DownloadCancelledError:
+                        raise
+                    except YtDlpDownloadError as exc:
+                        message = str(exc).lower()
+                        if "cancel" in message:
+                            raise DownloadCancelledError("Canceled. The download was stopped.") from exc
+                        if (
+                            "requested format is not available" in message
+                            and variant_index + 1 < len(request_variants)
+                        ):
+                            logger.warning(
+                                "Requested format unavailable for %s (%s); retrying with relaxed selector",
+                                request.url,
+                                request.kind.value,
+                            )
+                            break
+                        if attempt < attempts and self._is_temporary_source_failure_message(request.url, message):
+                            delay = min(2.0 * attempt, 6.0)
+                            logger.warning(
+                                "Temporary download failure for %s (%s), retrying in %.1fs (%s/%s): %s",
+                                request.url,
+                                request.kind.value,
+                                delay,
+                                attempt,
+                                attempts,
+                                exc,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.exception("yt-dlp download failed for %s (%s)", request.url, request.kind.value)
+                        if "ffmpeg is not installed" in message:
+                            raise DownloadError(
+                                "FFmpeg is required for this download but was not detected. "
+                                "Set FFMPEG_BINARY in .env to the full ffmpeg.exe path or restart after adding FFmpeg to PATH."
+                            ) from exc
+                        raise MediaUnavailableError(self._classify_source_error(exc, request.url)) from exc
+                else:
+                    continue
+                if 'file_path' in locals():
+                    break
+            else:
+                raise DownloadError("The selected quality could not be downloaded from the source platform.")
         except (DownloadCancelledError, DownloadError, MediaUnavailableError):
             raise
         except Exception as exc:
@@ -353,8 +378,8 @@ class MediaDownloader:
                     kind=MediaKind.VIDEO,
                     label=label,
                     selector=(
-                        f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-                        f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+                        f"bestvideo*[height<={height}]+bestaudio/"
+                        f"best[height<={height}]/bestvideo*+bestaudio/best"
                     ),
                     output_ext="mp4",
                 )
@@ -647,6 +672,12 @@ class MediaDownloader:
                 "Add an authorized YouTube cookies file to the bot configuration and try again."
             )
 
+        if "requested format is not available" in message:
+            return (
+                "That exact quality is not available from the source right now. "
+                "Please try another quality option."
+            )
+
         if any(
             token in message
             for token in (
@@ -733,6 +764,24 @@ class MediaDownloader:
     def _is_youtube_url(self, url: str) -> bool:
         lowered_url = url.lower()
         return "youtube.com" in lowered_url or "youtu.be" in lowered_url
+
+    def _relax_request_for_format_fallback(self, request: DownloadRequest) -> DownloadRequest | None:
+        if request.kind is MediaKind.VIDEO:
+            height_match = re.search(r"height<=([0-9]+)", request.format_selector or "")
+            if height_match:
+                height = height_match.group(1)
+                selector = f"best[height<={height}]/bestvideo*+bestaudio/best"
+            else:
+                selector = "bestvideo*+bestaudio/best"
+            if selector != (request.format_selector or ""):
+                return dataclasses.replace(request, format_selector=selector)
+
+        if request.kind is MediaKind.AUDIO and (request.output_ext or "").lower() == "m4a":
+            selector = "bestaudio/best"
+            if selector != (request.format_selector or ""):
+                return dataclasses.replace(request, format_selector=selector)
+
+        return None
 
     def _is_youtube_signin_challenge(self, url: str, message: str) -> bool:
         lowered_url = url.lower()
