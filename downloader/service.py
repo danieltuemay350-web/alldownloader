@@ -50,12 +50,28 @@ class MediaDownloader:
         )
 
     async def _extract_info(self, url: str) -> dict[str, Any]:
-        try:
-            return await asyncio.to_thread(self._extract_info_sync, url)
-        except YtDlpDownloadError as exc:
-            raise MediaUnavailableError(self._classify_source_error(exc)) from exc
-        except Exception as exc:
-            raise DownloadError("Failed to read media metadata from the source URL.") from exc
+        attempts = 3 if self._is_tiktok_url(url) else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.to_thread(self._extract_info_sync, url)
+            except YtDlpDownloadError as exc:
+                if attempt < attempts and self._is_temporary_source_failure_message(url, str(exc)):
+                    delay = min(2.0 * attempt, 6.0)
+                    logger.warning(
+                        "Temporary source extraction failure for %s, retrying in %.1fs (%s/%s): %s",
+                        url,
+                        delay,
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise MediaUnavailableError(self._classify_source_error(exc, url)) from exc
+            except Exception as exc:
+                raise DownloadError("Failed to read media metadata from the source URL.") from exc
+
+        raise DownloadError("Failed to read media metadata from the source URL.")
 
     def _build_metadata(self, request: DownloadRequest, info: dict[str, Any]) -> MediaMetadata:
         platform = require_supported_platform(request.url)
@@ -98,20 +114,45 @@ class MediaDownloader:
         job_dir = self.settings.temp_dir / f"{uuid.uuid4().hex}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        attempts = 2 if self._is_tiktok_url(request.url) else 1
         try:
-            file_path = await self._download_with_progress(request, metadata, job_dir, progress_callback, cancel_requested)
-        except DownloadCancelledError:
+            for attempt in range(1, attempts + 1):
+                try:
+                    file_path = await self._download_with_progress(
+                        request,
+                        metadata,
+                        job_dir,
+                        progress_callback,
+                        cancel_requested,
+                    )
+                    break
+                except DownloadCancelledError:
+                    raise
+                except YtDlpDownloadError as exc:
+                    if "cancel" in str(exc).lower():
+                        raise DownloadCancelledError("Canceled. The download was stopped.") from exc
+                    if attempt < attempts and self._is_temporary_source_failure_message(request.url, str(exc)):
+                        delay = min(2.0 * attempt, 6.0)
+                        logger.warning(
+                            "Temporary download failure for %s (%s), retrying in %.1fs (%s/%s): %s",
+                            request.url,
+                            request.kind.value,
+                            delay,
+                            attempt,
+                            attempts,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.exception("yt-dlp download failed for %s (%s)", request.url, request.kind.value)
+                    if "ffmpeg is not installed" in str(exc).lower():
+                        raise DownloadError(
+                            "FFmpeg is required for this download but was not detected. "
+                            "Set FFMPEG_BINARY in .env to the full ffmpeg.exe path or restart after adding FFmpeg to PATH."
+                        ) from exc
+                    raise MediaUnavailableError(self._classify_source_error(exc, request.url)) from exc
+        except (DownloadCancelledError, DownloadError, MediaUnavailableError):
             raise
-        except YtDlpDownloadError as exc:
-            logger.exception("yt-dlp download failed for %s (%s)", request.url, request.kind.value)
-            if "cancel" in str(exc).lower():
-                raise DownloadCancelledError("Canceled. The download was stopped.") from exc
-            if "ffmpeg is not installed" in str(exc).lower():
-                raise DownloadError(
-                    "FFmpeg is required for this download but was not detected. "
-                    "Set FFMPEG_BINARY in .env to the full ffmpeg.exe path or restart after adding FFmpeg to PATH."
-                ) from exc
-            raise MediaUnavailableError(self._classify_source_error(exc)) from exc
         except Exception as exc:
             logger.exception("Unexpected download failure for %s (%s)", request.url, request.kind.value)
             raise DownloadError("The download failed before completion.") from exc
@@ -144,17 +185,13 @@ class MediaDownloader:
         return await asyncio.to_thread(self._download_sync, request, metadata, job_dir, progress_hook)
 
     def _extract_info_sync(self, url: str) -> dict[str, Any]:
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "extract_flat": False,
-            "skip_download": True,
-            "socket_timeout": 30,
-            "retries": max(2, self.settings.ytdlp_retries // 2),
-        }
-        if self.settings.ytdlp_proxy:
-            options["proxy"] = self.settings.ytdlp_proxy
+        options = self._base_ytdlp_options(url, skip_download=True)
+        options.update(
+            {
+                "extract_flat": False,
+                "skip_download": True,
+            }
+        )
 
         with YoutubeDL(options) as ydl:
             return ydl.extract_info(url, download=False)
@@ -170,20 +207,16 @@ class MediaDownloader:
         if metadata.extractor_id:
             base_name = f"{base_name} [{metadata.extractor_id}]"
 
-        options: dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "socket_timeout": 30,
-            "retries": self.settings.ytdlp_retries,
-            "fragment_retries": self.settings.ytdlp_retries,
-            "outtmpl": str(job_dir / f"{base_name}.%(ext)s"),
-            "concurrent_fragment_downloads": self.settings.ytdlp_fragment_concurrency,
-            "continuedl": True,
-            "http_chunk_size": self.settings.ytdlp_http_chunk_size_bytes,
-        }
-        if self.settings.ytdlp_proxy:
-            options["proxy"] = self.settings.ytdlp_proxy
+        options: dict[str, Any] = self._base_ytdlp_options(request.url, skip_download=False)
+        options.update(
+            {
+                "fragment_retries": self.settings.ytdlp_retries,
+                "outtmpl": str(job_dir / f"{base_name}.%(ext)s"),
+                "concurrent_fragment_downloads": self.settings.ytdlp_fragment_concurrency,
+                "continuedl": True,
+                "http_chunk_size": self.settings.ytdlp_http_chunk_size_bytes,
+            }
+        )
         ffmpeg_location = self._resolve_ffmpeg_location()
         if ffmpeg_location:
             options["ffmpeg_location"] = ffmpeg_location
@@ -400,6 +433,56 @@ class MediaDownloader:
             return None
         return max(video_sizes) + audio_size
 
+    def _base_ytdlp_options(self, url: str, *, skip_download: bool) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 30,
+            "retries": max(2, self.settings.ytdlp_retries // 2) if skip_download else self.settings.ytdlp_retries,
+            "extractor_retries": self.settings.ytdlp_extractor_retries,
+        }
+
+        if self.settings.ytdlp_retry_sleep_seconds > 0:
+            options["retry_sleep_functions"] = {
+                "http": self.settings.ytdlp_retry_sleep_seconds,
+                "extractor": self.settings.ytdlp_retry_sleep_seconds,
+                "fragment": self.settings.ytdlp_retry_sleep_seconds,
+            }
+
+        if self.settings.ytdlp_sleep_interval_requests > 0:
+            options["sleep_interval_requests"] = self.settings.ytdlp_sleep_interval_requests
+
+        if self.settings.ytdlp_proxy:
+            options["proxy"] = self.settings.ytdlp_proxy
+
+        extractor_args = self._build_extractor_args(url)
+        if extractor_args:
+            options["extractor_args"] = extractor_args
+
+        return options
+
+    def _build_extractor_args(self, url: str) -> dict[str, dict[str, list[str]]]:
+        extractor_args: dict[str, dict[str, list[str]]] = {}
+
+        if self.settings.ytdlp_generic_impersonate:
+            extractor_args["generic"] = {
+                "impersonate": [self.settings.ytdlp_generic_impersonate],
+            }
+
+        if self._is_tiktok_url(url):
+            tiktok_args: dict[str, list[str]] = {}
+            if self.settings.tiktok_api_hostname:
+                tiktok_args["api_hostname"] = [self.settings.tiktok_api_hostname]
+            if self.settings.tiktok_app_info:
+                tiktok_args["app_info"] = [self.settings.tiktok_app_info]
+            if self.settings.tiktok_device_id:
+                tiktok_args["device_id"] = [self.settings.tiktok_device_id]
+            if tiktok_args:
+                extractor_args["tiktok"] = tiktok_args
+
+        return extractor_args
+
     def _max_sendable_bytes(self) -> int:
         if self.settings.telegram_api_id and self.settings.telegram_api_hash:
             return self.settings.mtproto_limit_bytes
@@ -487,8 +570,16 @@ class MediaDownloader:
             return f"{minutes} minute(s)"
         return f"{total_seconds} second(s)"
 
-    def _classify_source_error(self, exc: Exception) -> str:
+    def _classify_source_error(self, exc: Exception, url: str = "") -> str:
         message = str(exc).lower()
+
+        if self._is_temporary_source_failure_message(url, message):
+            if self._is_tiktok_url(url):
+                return (
+                    "TikTok closed the connection before the bot could fetch the media. "
+                    "This is usually temporary blocking or a network issue. Please try again in a moment."
+                )
+            return "The source platform temporarily refused the connection. Please try again in a moment."
 
         if any(
             token in message
@@ -550,3 +641,25 @@ class MediaDownloader:
             return "This content looks deleted, unavailable, or no longer accessible at this link."
 
         return "The content could not be accessed from the source platform."
+
+    def _is_temporary_source_failure_message(self, url: str, message: str) -> bool:
+        lowered = message.lower()
+        if not self._is_tiktok_url(url):
+            return False
+
+        return any(
+            token in lowered
+            for token in (
+                "connection aborted",
+                "connection reset",
+                "forcibly closed by the remote host",
+                "timed out",
+                "transporterror",
+                "remote end closed connection",
+                "unable to download webpage",
+            )
+        )
+
+    def _is_tiktok_url(self, url: str) -> bool:
+        lowered_url = url.lower()
+        return "tiktok.com" in lowered_url or "vm.tiktok" in lowered_url

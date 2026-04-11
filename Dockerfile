@@ -16,9 +16,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . /app
 
-RUN useradd --create-home appuser \
-    && chown -R appuser:appuser /app
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R 10001:10001 /app
 
-USER appuser
+USER 10001
 
 CMD ["python", "main.py"]

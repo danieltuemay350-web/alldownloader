@@ -19,6 +19,13 @@ def _env_str(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
+
+
 def _env_path(name: str, default: str, base_dir: Path) -> Path:
     raw = os.getenv(name, default).strip()
     path = Path(raw)
@@ -55,6 +62,13 @@ class Settings:
     ytdlp_http_chunk_size_bytes: int
     ytdlp_fragment_concurrency: int
     ytdlp_retries: int
+    ytdlp_extractor_retries: int
+    ytdlp_sleep_interval_requests: float
+    ytdlp_retry_sleep_seconds: float
+    ytdlp_generic_impersonate: str | None
+    tiktok_api_hostname: str | None
+    tiktok_app_info: str | None
+    tiktok_device_id: str | None
     mtproto_part_size_kb: int
     log_level: str
 
@@ -100,6 +114,13 @@ class Settings:
             ytdlp_http_chunk_size_bytes=_env_int("YTDLP_HTTP_CHUNK_SIZE_BYTES", 10 * 1024 * 1024),
             ytdlp_fragment_concurrency=_env_int("YTDLP_FRAGMENT_CONCURRENCY", 6),
             ytdlp_retries=_env_int("YTDLP_RETRIES", 5),
+            ytdlp_extractor_retries=_env_int("YTDLP_EXTRACTOR_RETRIES", 5),
+            ytdlp_sleep_interval_requests=_env_float("YTDLP_SLEEP_INTERVAL_REQUESTS", 0.75),
+            ytdlp_retry_sleep_seconds=_env_float("YTDLP_RETRY_SLEEP_SECONDS", 2.0),
+            ytdlp_generic_impersonate=_env_str("YTDLP_GENERIC_IMPERSONATE") or None,
+            tiktok_api_hostname=_env_str("TIKTOK_API_HOSTNAME") or None,
+            tiktok_app_info=_env_str("TIKTOK_APP_INFO") or None,
+            tiktok_device_id=_env_str("TIKTOK_DEVICE_ID") or None,
             mtproto_part_size_kb=_env_int("MTPROTO_PART_SIZE_KB", 512),
             log_level=_env_str("LOG_LEVEL", "INFO").upper(),
         )

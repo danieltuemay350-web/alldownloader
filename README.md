@@ -78,10 +78,15 @@ Speed tuning environment variables:
 YTDLP_HTTP_CHUNK_SIZE_BYTES=10485760
 YTDLP_FRAGMENT_CONCURRENCY=6
 YTDLP_RETRIES=5
+YTDLP_EXTRACTOR_RETRIES=5
+YTDLP_SLEEP_INTERVAL_REQUESTS=0.75
+YTDLP_RETRY_SLEEP_SECONDS=2.0
 MTPROTO_PART_SIZE_KB=512
 ```
 
 For faster MTProto uploads, keep `cryptg` installed from `requirements.txt`. Telethon's official docs note that it can provide a considerable speed-up for heavy upload/download workloads.
+
+For TikTok, the bot now retries temporary connection resets automatically. If TikTok continues refusing requests from your network, you can optionally provide `TIKTOK_API_HOSTNAME`, `TIKTOK_APP_INFO`, `TIKTOK_DEVICE_ID`, or a proxy in `.env`.
 
 ## Large File Delivery
 
