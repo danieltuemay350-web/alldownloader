@@ -121,14 +121,13 @@ class MediaDownloader:
         job_dir = self.settings.temp_dir / f"{uuid.uuid4().hex}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
-        request_variants = [request]
-        relaxed_request = self._relax_request_for_format_fallback(request)
-        if relaxed_request is not None:
-            request_variants.append(relaxed_request)
+        request_variants = self._request_variants_for_fallback(request)
 
         attempts = 2 if self._is_tiktok_url(request.url) else 1
+        file_path: Path | None = None
         try:
             for variant_index, current_request in enumerate(request_variants):
+                requested_format_unavailable = False
                 for attempt in range(1, attempts + 1):
                     try:
                         file_path = await self._download_with_progress(
@@ -149,10 +148,13 @@ class MediaDownloader:
                             "requested format is not available" in message
                             and variant_index + 1 < len(request_variants)
                         ):
+                            requested_format_unavailable = True
                             logger.warning(
-                                "Requested format unavailable for %s (%s); retrying with relaxed selector",
+                                "Requested format unavailable for %s (%s); retrying with fallback selector %s/%s",
                                 request.url,
                                 request.kind.value,
+                                variant_index + 2,
+                                len(request_variants),
                             )
                             break
                         if attempt < attempts and self._is_temporary_source_failure_message(request.url, message):
@@ -177,8 +179,10 @@ class MediaDownloader:
                         raise MediaUnavailableError(self._classify_source_error(exc, request.url)) from exc
                 else:
                     continue
-                if 'file_path' in locals():
+                if file_path is not None:
                     break
+                if requested_format_unavailable:
+                    continue
             else:
                 raise DownloadError("The selected quality could not be downloaded from the source platform.")
         except (DownloadCancelledError, DownloadError, MediaUnavailableError):
@@ -782,6 +786,25 @@ class MediaDownloader:
                 return dataclasses.replace(request, format_selector=selector)
 
         return None
+
+    def _request_variants_for_fallback(self, request: DownloadRequest) -> list[DownloadRequest]:
+        variants = [request]
+
+        relaxed_request = self._relax_request_for_format_fallback(request)
+        if relaxed_request is not None and relaxed_request.format_selector != variants[-1].format_selector:
+            variants.append(relaxed_request)
+
+        if request.kind is MediaKind.VIDEO:
+            final_selector = "best"
+        elif (request.output_ext or "").lower() == "m4a":
+            final_selector = "bestaudio/best"
+        else:
+            final_selector = None
+
+        if final_selector and all(final_selector != (variant.format_selector or "") for variant in variants):
+            variants.append(dataclasses.replace(request, format_selector=final_selector))
+
+        return variants
 
     def _is_youtube_signin_challenge(self, url: str, message: str) -> bool:
         lowered_url = url.lower()
