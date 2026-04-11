@@ -41,6 +41,8 @@ class Settings:
     admin_chat_id: int | None
     telegram_api_id: int | None
     telegram_api_hash: str | None
+    service_host: str
+    service_port: int
     download_concurrency: int
     download_timeout_seconds: int
     rate_limit_count: int
@@ -93,6 +95,8 @@ class Settings:
             admin_chat_id=_env_int("ADMIN_CHAT_ID", 0) or None,
             telegram_api_id=_env_int("TELEGRAM_API_ID", 0) or None,
             telegram_api_hash=_env_str("TELEGRAM_API_HASH") or None,
+            service_host=_env_str("SERVICE_HOST", "0.0.0.0"),
+            service_port=_env_int("PORT", _env_int("SERVICE_PORT", 8080)),
             download_concurrency=_env_int("DOWNLOAD_CONCURRENCY", 3),
             download_timeout_seconds=_env_int("DOWNLOAD_TIMEOUT_SECONDS", 1800),
             rate_limit_count=_env_int("RATE_LIMIT_COUNT", 5),

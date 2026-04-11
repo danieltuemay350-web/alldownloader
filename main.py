@@ -15,6 +15,7 @@ from config import settings
 from downloader.queue import DownloadManager
 from downloader.service import MediaDownloader
 from utils.cleanup import CleanupScheduler
+from utils.health_server import HealthServer
 from utils.logging import setup_logging
 from utils.public_links import PublicFileStore
 from utils.ratelimit import RateLimiter
@@ -51,6 +52,7 @@ async def main() -> None:
         logging.getLogger().addHandler(error_handler)
 
     cleanup = CleanupScheduler(interval_seconds=30)
+    health_server = HealthServer(settings=settings)
     file_store = PublicFileStore(settings=settings, cleanup=cleanup)
     mtproto = MTProtoUploader(settings=settings)
     downloader = MediaDownloader(settings=settings)
@@ -86,6 +88,7 @@ async def main() -> None:
         ]
     )
 
+    await health_server.start()
     await cleanup.start()
     await mtproto.start()
     await manager.start()
@@ -97,6 +100,7 @@ async def main() -> None:
         logger.info("Shutting down services")
         await manager.stop()
         await mtproto.stop()
+        await health_server.stop()
         await file_store.stop()
         await cleanup.stop()
         if error_handler is not None:

@@ -5,6 +5,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+EXPOSE 8080
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*

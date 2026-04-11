@@ -48,6 +48,14 @@ docker build -t telegram-media-bot .
 docker run --env-file .env telegram-media-bot
 ```
 
+The bot also starts a lightweight HTTP health server on `SERVICE_HOST:SERVICE_PORT` so service platforms such as Choreo can keep the container healthy while the Telegram bot continues polling in the background.
+
+Health endpoints:
+
+- `/`
+- `/healthz`
+- `/readyz`
+
 ## Deploy on Render
 
 This project includes `render.yaml` for a `Background Worker` deployment on Render.
