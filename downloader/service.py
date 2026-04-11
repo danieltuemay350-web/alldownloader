@@ -461,7 +461,7 @@ class MediaDownloader:
         if self.settings.ytdlp_proxy:
             options["proxy"] = self.settings.ytdlp_proxy
 
-        cookie_file = self._resolve_cookie_file_for_ytdlp()
+        cookie_file = self._resolve_cookie_file_for_ytdlp(url)
         if cookie_file:
             options["cookiefile"] = cookie_file
 
@@ -518,7 +518,10 @@ class MediaDownloader:
 
         return shutil.which("ffmpeg")
 
-    def _resolve_cookie_file_for_ytdlp(self) -> str | None:
+    def _resolve_cookie_file_for_ytdlp(self, url: str) -> str | None:
+        if not self._is_youtube_url(url):
+            return None
+
         cookie_path = self.settings.ytdlp_cookie_file
         if cookie_path is None:
             return None
@@ -552,7 +555,19 @@ class MediaDownloader:
                     "The configured YouTube cookies file is not in Netscape cookies.txt format."
                 )
 
-        return str(cookie_path)
+        runtime_cookie_dir = self.settings.runtime_dir / "state"
+        runtime_cookie_dir.mkdir(parents=True, exist_ok=True)
+        runtime_cookie_path = runtime_cookie_dir / "youtube-cookies.txt"
+
+        try:
+            if cookie_path.resolve() != runtime_cookie_path.resolve():
+                shutil.copyfile(cookie_path, runtime_cookie_path)
+        except OSError as exc:
+            raise DownloadError(
+                "The YouTube cookies file could not be copied into writable runtime storage."
+            ) from exc
+
+        return str(runtime_cookie_path)
 
     def _build_progress_hook(
         self,
@@ -714,6 +729,10 @@ class MediaDownloader:
     def _is_tiktok_url(self, url: str) -> bool:
         lowered_url = url.lower()
         return "tiktok.com" in lowered_url or "vm.tiktok" in lowered_url
+
+    def _is_youtube_url(self, url: str) -> bool:
+        lowered_url = url.lower()
+        return "youtube.com" in lowered_url or "youtu.be" in lowered_url
 
     def _is_youtube_signin_challenge(self, url: str, message: str) -> bool:
         lowered_url = url.lower()
