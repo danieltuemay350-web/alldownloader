@@ -831,34 +831,6 @@ class MediaDownloader:
         if any(
             token in message
             for token in (
-                "login required",
-                "sign in",
-                "cookies",
-                "authentication required",
-                "members only",
-                "membership",
-                "age-restricted",
-                "confirm your age",
-            )
-        ):
-            return "This content requires you to be logged in, and the bot does not have authorized access for it."
-
-        if any(
-            token in message
-            for token in (
-                "not available in your country",
-                "not available from your location",
-                "geo",
-                "region",
-                "country",
-                "blocked in your country",
-            )
-        ):
-            return "This content appears to be geo-blocked and is not available from the bot's current region."
-
-        if any(
-            token in message
-            for token in (
                 "private video",
                 "is private",
                 "private content",
@@ -870,6 +842,23 @@ class MediaDownloader:
             )
         ):
             return "This content is private or restricted to approved viewers."
+
+        if any(
+            token in message
+            for token in (
+                "not available in your country",
+                "not available from your location",
+                "geo-blocked",
+                "geoblocked",
+                "blocked in your country",
+                "blocked in your region",
+                "region locked",
+            )
+        ):
+            return "This content appears to be geo-blocked and is not available from the bot's current region."
+
+        if self._looks_like_login_requirement(message):
+            return "This content requires you to be logged in, and the bot does not have authorized access for it."
 
         if any(
             token in message
@@ -888,6 +877,30 @@ class MediaDownloader:
             return "This content looks deleted, unavailable, or no longer accessible at this link."
 
         return "The content could not be accessed from the source platform."
+
+    def _looks_like_login_requirement(self, message: str) -> bool:
+        direct_tokens = (
+            "login required",
+            "authentication required",
+            "requires login",
+            "requires authentication",
+            "members only",
+            "membership required",
+            "age-restricted",
+            "confirm your age",
+        )
+        if any(token in message for token in direct_tokens):
+            return True
+
+        sign_in_tokens = (
+            "sign in to continue",
+            "please sign in",
+            "must sign in",
+            "log in to view",
+            "login to view",
+            "login to access",
+        )
+        return any(token in message for token in sign_in_tokens)
 
     def _is_temporary_source_failure_message(self, url: str, message: str) -> bool:
         lowered = message.lower()
