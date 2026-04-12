@@ -381,10 +381,7 @@ class MediaDownloader:
                     option_id=f"v{index}",
                     kind=MediaKind.VIDEO,
                     label=label,
-                    selector=(
-                        f"bestvideo*[height<={height}]+bestaudio/"
-                        f"best[height<={height}]/bestvideo*+bestaudio/best"
-                    ),
+                    selector=self._build_video_selector(formats, height),
                     output_ext="mp4",
                 )
             )
@@ -408,14 +405,14 @@ class MediaDownloader:
                 option_id="aorig",
                 kind=MediaKind.AUDIO,
                 label=f"Original audio (fastest{original_text})",
-                selector="bestaudio[ext=m4a]/bestaudio[acodec!=none]/bestaudio/best",
+                selector=self._build_audio_selector(formats, prefer_container="m4a"),
                 output_ext="m4a",
             ),
             FormatOption(
                 option_id="a320",
                 kind=MediaKind.AUDIO,
                 label=f"MP3 audio (320 kbps, ~{human_bytes(mp3_320_size)})",
-                selector="bestaudio[acodec!=none]/bestaudio/best",
+                selector=self._build_audio_selector(formats),
                 output_ext="mp3",
                 audio_bitrate_kbps=320,
             ),
@@ -423,7 +420,7 @@ class MediaDownloader:
                 option_id="a192",
                 kind=MediaKind.AUDIO,
                 label=f"MP3 audio (192 kbps, ~{human_bytes(mp3_192_size)})",
-                selector="bestaudio[acodec!=none]/bestaudio/best",
+                selector=self._build_audio_selector(formats),
                 output_ext="mp3",
                 audio_bitrate_kbps=192,
             ),
@@ -431,7 +428,7 @@ class MediaDownloader:
                 option_id="a128",
                 kind=MediaKind.AUDIO,
                 label=f"Fast MP3 audio (128 kbps, ~{human_bytes(mp3_128_size)})",
-                selector="bestaudio[acodec!=none]/bestaudio/best",
+                selector=self._build_audio_selector(formats),
                 output_ext="mp3",
                 audio_bitrate_kbps=128,
             ),
@@ -466,6 +463,155 @@ class MediaDownloader:
         if not video_sizes:
             return None
         return max(video_sizes) + audio_size
+
+    def _build_video_selector(self, formats: list[dict[str, Any]], max_height: int) -> str:
+        selectors: list[str] = []
+
+        video_only = self._best_video_only_format(formats, max_height, preferred_exts=("mp4", "webm"))
+        preferred_audio = self._best_audio_format(formats, preferred_exts=("m4a", "mp4", "webm"))
+        fallback_audio = self._best_audio_format(formats, preferred_exts=("webm", "m4a", "mp4"))
+        progressive = self._best_progressive_format(formats, max_height, preferred_exts=("mp4", "webm"))
+
+        if video_only and preferred_audio:
+            selectors.append(f"{video_only['format_id']}+{preferred_audio['format_id']}")
+        if video_only and fallback_audio:
+            selectors.append(f"{video_only['format_id']}+{fallback_audio['format_id']}")
+        if progressive:
+            selectors.append(str(progressive["format_id"]))
+
+        selectors.extend(
+            [
+                f"best[height<={max_height}]",
+                f"bestvideo*[height<={max_height}]+bestaudio/best",
+                "best",
+            ]
+        )
+        return "/".join(self._unique_preserve_order(selectors))
+
+    def _build_audio_selector(
+        self,
+        formats: list[dict[str, Any]],
+        *,
+        prefer_container: str | None = None,
+    ) -> str:
+        selectors: list[str] = []
+        preferred_exts = tuple(
+            ext
+            for ext in (
+                prefer_container,
+                "m4a",
+                "webm",
+                "mp4",
+            )
+            if ext
+        )
+        preferred_audio = self._best_audio_format(formats, preferred_exts=preferred_exts or ("m4a", "webm", "mp4"))
+        fallback_audio = self._best_audio_format(formats, preferred_exts=("webm", "m4a", "mp4"))
+
+        if preferred_audio:
+            selectors.append(str(preferred_audio["format_id"]))
+        if fallback_audio:
+            selectors.append(str(fallback_audio["format_id"]))
+
+        selectors.extend(["bestaudio/best", "best"])
+        return "/".join(self._unique_preserve_order(selectors))
+
+    def _best_progressive_format(
+        self,
+        formats: list[dict[str, Any]],
+        max_height: int,
+        *,
+        preferred_exts: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            fmt
+            for fmt in formats
+            if fmt.get("format_id")
+            and fmt.get("vcodec") not in {None, "none"}
+            and fmt.get("acodec") not in {None, "none"}
+            and (fmt.get("height") or 0) <= max_height
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda fmt: (
+                self._ext_preference(fmt.get("ext"), preferred_exts),
+                -(fmt.get("height") or 0),
+                -(fmt.get("fps") or 0),
+                -(fmt.get("tbr") or 0),
+                -int(fmt.get("filesize") or fmt.get("filesize_approx") or 0),
+            ),
+        )
+
+    def _best_video_only_format(
+        self,
+        formats: list[dict[str, Any]],
+        max_height: int,
+        *,
+        preferred_exts: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            fmt
+            for fmt in formats
+            if fmt.get("format_id")
+            and fmt.get("vcodec") not in {None, "none"}
+            and fmt.get("acodec") == "none"
+            and (fmt.get("height") or 0) <= max_height
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda fmt: (
+                self._ext_preference(fmt.get("ext"), preferred_exts),
+                -(fmt.get("height") or 0),
+                -(fmt.get("fps") or 0),
+                -(fmt.get("tbr") or 0),
+                -int(fmt.get("filesize") or fmt.get("filesize_approx") or 0),
+            ),
+        )
+
+    def _best_audio_format(
+        self,
+        formats: list[dict[str, Any]],
+        *,
+        preferred_exts: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            fmt
+            for fmt in formats
+            if fmt.get("format_id") and fmt.get("acodec") not in {None, "none"}
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda fmt: (
+                self._ext_preference(fmt.get("ext"), preferred_exts),
+                -(fmt.get("abr") or 0),
+                -(fmt.get("tbr") or 0),
+                -int(fmt.get("filesize") or fmt.get("filesize_approx") or 0),
+            ),
+        )
+
+    def _ext_preference(self, ext: str | None, preferred_exts: tuple[str, ...]) -> int:
+        if not ext:
+            return len(preferred_exts)
+        try:
+            return preferred_exts.index(ext)
+        except ValueError:
+            return len(preferred_exts)
+
+    def _unique_preserve_order(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return result
 
     def _base_ytdlp_options(self, url: str, *, skip_download: bool) -> dict[str, Any]:
         options: dict[str, Any] = {
