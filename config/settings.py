@@ -109,6 +109,7 @@ class Settings:
     temp_dir: Path
     public_dir: Path
     ytdlp_cookie_file: Path | None
+    ytdlp_user_agent: str
     ffmpeg_binary: str | None
     ytdlp_proxy: str | None
     ytdlp_http_chunk_size_bytes: int
@@ -167,7 +168,15 @@ class Settings:
             public_base_url=_env_str("PUBLIC_BASE_URL") or None,
             temp_dir=_env_runtime_path("TEMP_DIR", runtime_dir / "storage" / "temp", path_anchor),
             public_dir=_env_runtime_path("PUBLIC_DIR", runtime_dir / "storage" / "public", path_anchor),
-            ytdlp_cookie_file=_env_optional_path("YTDLP_COOKIE_FILE", path_anchor),
+            ytdlp_cookie_file=_env_optional_path("YTDLP_COOKIE_FILE", path_anchor) or (path_anchor / "cookies.txt").resolve(),
+            ytdlp_user_agent=_env_str(
+                "YTDLP_USER_AGENT",
+                (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/135.0.0.0 Safari/537.36"
+                ),
+            ),
             ffmpeg_binary=_env_str("FFMPEG_BINARY") or None,
             ytdlp_proxy=_env_str("YTDLP_PROXY") or None,
             ytdlp_http_chunk_size_bytes=_env_int("YTDLP_HTTP_CHUNK_SIZE_BYTES", 10 * 1024 * 1024),

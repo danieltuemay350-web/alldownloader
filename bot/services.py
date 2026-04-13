@@ -6,6 +6,7 @@ import logging
 import shutil
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from aiogram import Bot
@@ -47,24 +48,65 @@ class MTProtoUploader:
             )
             return
 
-        session_dir = self.settings.runtime_dir / "state"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        session_path = str(session_dir / "bot_mtproto")
-        self._client = TelegramClient(
-            session=session_path,
-            api_id=self.settings.telegram_api_id,
-            api_hash=self.settings.telegram_api_hash,
-            connection=ConnectionTcpAbridged,
-            request_retries=3,
-            connection_retries=3,
-        )
-        await self._client.start(bot_token=self.settings.bot_token)
+        session_base = self._session_base_path()
+        session_base.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self._client = self._create_client(session_base)
+            await self._client.start(bot_token=self.settings.bot_token)
+        except (ValueError, TypeError) as exc:
+            if not self._looks_like_incompatible_session(exc):
+                raise
+            logger.warning(
+                "MTProto session file is incompatible with the installed Telethon version. "
+                "Backing it up and creating a fresh session."
+            )
+            await self._close_partial_client()
+            self._backup_session_files(session_base)
+            self._client = self._create_client(session_base)
+            await self._client.start(bot_token=self.settings.bot_token)
         logger.info("MTProto uploader is ready")
 
     async def stop(self) -> None:
         if self._client is not None:
             await self._client.disconnect()
             self._client = None
+
+    def _session_base_path(self) -> Path:
+        return self.settings.runtime_dir / "state" / "bot_mtproto"
+
+    def _create_client(self, session_base: Path) -> TelegramClient:
+        return TelegramClient(
+            session=str(session_base),
+            api_id=self.settings.telegram_api_id,
+            api_hash=self.settings.telegram_api_hash,
+            connection=ConnectionTcpAbridged,
+            request_retries=3,
+            connection_retries=3,
+        )
+
+    async def _close_partial_client(self) -> None:
+        if self._client is None:
+            return
+        try:
+            await self._client.disconnect()
+        except Exception:
+            logger.debug("Ignoring MTProto client disconnect failure during session recovery", exc_info=True)
+        finally:
+            self._client = None
+
+    def _looks_like_incompatible_session(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "too many values to unpack" in message or "not enough values to unpack" in message
+
+    def _backup_session_files(self, session_base: Path) -> None:
+        timestamp = int(time.time())
+        for suffix in (".session", ".session-journal"):
+            path = session_base.with_suffix(suffix)
+            if not path.exists():
+                continue
+            backup_path = path.with_name(f"{path.name}.bak-{timestamp}")
+            path.replace(backup_path)
 
     async def send_file(
         self,

@@ -96,7 +96,7 @@ For faster MTProto uploads, keep `cryptg` installed from `requirements.txt`. Tel
 
 For TikTok, the bot now retries temporary connection resets automatically. If TikTok continues refusing requests from your network, you can optionally provide `TIKTOK_API_HOSTNAME`, `TIKTOK_APP_INFO`, `TIKTOK_DEVICE_ID`, or a proxy in `.env`.
 
-For YouTube, some videos may trigger a sign-in challenge from YouTube. In that case, configure `YTDLP_COOKIE_FILE` with an authorized cookies file in Netscape format. On Choreo, this is best provided through a file mount.
+To use authenticated requests across supported platforms, place a Netscape-format `cookies.txt` file in the project root or point `YTDLP_COOKIE_FILE` at it explicitly. The bot now checks that the file exists before passing it to `yt-dlp`, so deployment will not crash if the file is missing. A browser-like `YTDLP_USER_AGENT` header is also sent with shared `yt-dlp` options to reduce rate-limit and bot-check issues. On Choreo, cookies are best provided through a file mount.
 
 ## Large File Delivery
 

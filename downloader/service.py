@@ -636,7 +636,11 @@ class MediaDownloader:
         if self.settings.ytdlp_proxy:
             options["proxy"] = self.settings.ytdlp_proxy
 
-        cookie_file = self._resolve_cookie_file_for_ytdlp(url)
+        options["http_headers"] = {
+            "User-Agent": self.settings.ytdlp_user_agent,
+        }
+
+        cookie_file = self._resolve_cookie_file_for_ytdlp()
         if cookie_file:
             options["cookiefile"] = cookie_file
 
@@ -693,54 +697,57 @@ class MediaDownloader:
 
         return shutil.which("ffmpeg")
 
-    def _resolve_cookie_file_for_ytdlp(self, url: str) -> str | None:
-        if not self._is_youtube_url(url):
-            return None
-
+    def _resolve_cookie_file_for_ytdlp(self) -> str | None:
         cookie_path = self.settings.ytdlp_cookie_file
         if cookie_path is None:
             return None
 
         if not cookie_path.exists():
-            raise DownloadError(
-                "The configured YouTube cookies file was not found in the runtime environment. "
-                "Check the Choreo file mount and YTDLP_COOKIE_FILE path."
-            )
+            logger.debug("Cookies file %s was not found. Continuing without authenticated cookies.", cookie_path)
+            return None
         if not cookie_path.is_file():
-            raise DownloadError(
-                "The configured YTDLP_COOKIE_FILE path is not a file. "
-                "Check the Choreo file mount target path."
-            )
+            logger.warning("Configured cookies path %s is not a file. Continuing without authenticated cookies.", cookie_path)
+            return None
 
         try:
             first_line = cookie_path.read_text(encoding="utf-8", errors="ignore").splitlines()[:1]
         except OSError as exc:
-            raise DownloadError(
-                "The configured YouTube cookies file could not be read. "
-                "Check the Choreo file mount permissions."
-            ) from exc
+            logger.warning(
+                "Configured cookies file %s could not be read. Continuing without authenticated cookies.",
+                cookie_path,
+                exc_info=exc,
+            )
+            return None
 
         if cookie_path.stat().st_size <= 0:
-            raise DownloadError("The configured YouTube cookies file is empty.")
+            logger.warning("Configured cookies file %s is empty. Continuing without authenticated cookies.", cookie_path)
+            return None
 
         if first_line:
             header = first_line[0].strip().lower()
             if header and "netscape" not in header and "http cookie file" not in header:
-                raise DownloadError(
-                    "The configured YouTube cookies file is not in Netscape cookies.txt format."
+                logger.warning(
+                    "Configured cookies file %s is not in Netscape cookies.txt format. "
+                    "Continuing without authenticated cookies.",
+                    cookie_path,
                 )
+                return None
 
         runtime_cookie_dir = self.settings.runtime_dir / "state"
         runtime_cookie_dir.mkdir(parents=True, exist_ok=True)
-        runtime_cookie_path = runtime_cookie_dir / "youtube-cookies.txt"
+        runtime_cookie_path = runtime_cookie_dir / "yt-dlp-cookies.txt"
 
         try:
             if cookie_path.resolve() != runtime_cookie_path.resolve():
                 shutil.copyfile(cookie_path, runtime_cookie_path)
         except OSError as exc:
-            raise DownloadError(
-                "The YouTube cookies file could not be copied into writable runtime storage."
-            ) from exc
+            logger.warning(
+                "Cookies file %s could not be copied into writable runtime storage. "
+                "Continuing without authenticated cookies.",
+                cookie_path,
+                exc_info=exc,
+            )
+            return None
 
         return str(runtime_cookie_path)
 
